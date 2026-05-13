@@ -15,7 +15,7 @@ use crate::constants::{MULTISIG_FORWARDER_ADDRESS_LEN, WRAP_FORWARDER_OP_WRAP};
 use crate::journal::{self, LogicInstance};
 use crate::label::{LabelPreimage, NULLIFIER_KEY_DOMAIN};
 use crate::sig::{verify_secp256k1, SigError};
-use crate::spend::{spend_message, OutflowDigests};
+use crate::spend::{spend_message, RecipientCommitments};
 use crate::witness::{
     MultisigConsumedWitness, MultisigCreatedWitness, WrapInflowWitness, WrapOutflowWitness,
 };
@@ -46,12 +46,19 @@ pub enum CircuitError {
     ChangeOverflow,
     #[error("change_resource.commitment not in action_tags")]
     ChangeNotInAction,
+    #[error("recipient_resources[{idx}].commitment not in action_tags")]
+    RecipientNotInAction { idx: usize },
     #[error("external payload[{idx}] is malformed")]
     BadExternalPayload { idx: usize },
     #[error("external payload[{idx}] token != label.token_addr")]
     ExternalTokenMismatch { idx: usize },
-    #[error("sum(MULTISIG_FORWARDER amounts) != consumed - change ({sum} vs {expected})")]
-    AmountSumMismatch { sum: u128, expected: u128 },
+    #[error("conservation broken: external_sum + recipient_sum + change != consumed ({external_sum} + {recipient_sum} + {change} != {consumed})")]
+    ConservationBroken {
+        external_sum: u128,
+        recipient_sum: u128,
+        change: u128,
+        consumed: u128,
+    },
     #[error("WrapForwarder external_payload op != WRAP")]
     WrapInflowWrongOp,
     #[error("WrapForwarder external_payload token != label.token_addr")]
@@ -170,12 +177,29 @@ pub fn constrain_multisig_consumed(
         return Err(CircuitError::ChangeNotInAction);
     }
 
-    // 9. Compute spent_amount = consumed - change
-    let spent_amount = witness.resource.quantity - witness.change_resource.quantity;
+    // 9. Verify each RM-internal recipient is in the action and gather their commitments
+    //    (sorted) for the spend_message binding.
+    let mut recipient_commitments_unsorted: Vec<[u8; 32]> = Vec::with_capacity(witness.recipient_resources.len());
+    let mut recipient_sum: u128 = 0;
+    for (idx, recipient) in witness.recipient_resources.iter().enumerate() {
+        let cm = recipient.commitment();
+        if !witness.action_tags.iter().any(|t| t == &cm) {
+            return Err(CircuitError::RecipientNotInAction { idx });
+        }
+        recipient_sum = recipient_sum.checked_add(recipient.quantity).ok_or(CircuitError::ConservationBroken {
+            external_sum: 0,
+            recipient_sum: u128::MAX,
+            change: witness.change_resource.quantity,
+            consumed: witness.resource.quantity,
+        })?;
+        recipient_commitments_unsorted.push(digest_to_array(&cm));
+    }
 
     // 10. Walk external payloads; for each MULTISIG_FORWARDER call, accumulate the (token,
-    //     amount) and require token == label.token_addr.
-    let mut sum: u128 = 0;
+    //     amount) and require token == label.token_addr. (Other forwarder addresses are
+    //     allowed but don't count toward this multisig's spend conservation — they're a
+    //     compositional escape hatch governed by their own logics.)
+    let mut external_sum: u128 = 0;
     for (idx, blob) in witness.app_data.external_payload.iter().enumerate() {
         let parsed = parse_external_call(&blob.blob).ok_or(CircuitError::BadExternalPayload { idx })?;
         if parsed.forwarder == multisig_forwarder {
@@ -185,19 +209,41 @@ pub fn constrain_multisig_consumed(
             if inner.token != witness.label_preimage.token_addr {
                 return Err(CircuitError::ExternalTokenMismatch { idx });
             }
-            sum = sum
+            external_sum = external_sum
                 .checked_add(inner.amount)
-                .ok_or(CircuitError::AmountSumMismatch { sum: u128::MAX, expected: spent_amount })?;
+                .ok_or(CircuitError::ConservationBroken {
+                    external_sum: u128::MAX,
+                    recipient_sum,
+                    change: witness.change_resource.quantity,
+                    consumed: witness.resource.quantity,
+                })?;
         }
     }
-    if sum != spent_amount {
-        return Err(CircuitError::AmountSumMismatch {
-            sum,
-            expected: spent_amount,
+
+    // 11. Conservation: external_sum + recipient_sum + change.quantity == consumed.quantity.
+    //     This single equation supports three modes:
+    //       - Pure EVM withdraw  : recipient_sum = 0,  external_sum > 0
+    //       - Pure RM-internal   : external_sum  = 0,  recipient_sum > 0  (private, AnomaPay-style)
+    //       - Hybrid             : both > 0
+    let total = external_sum
+        .checked_add(recipient_sum)
+        .and_then(|s| s.checked_add(witness.change_resource.quantity))
+        .ok_or(CircuitError::ConservationBroken {
+            external_sum,
+            recipient_sum,
+            change: witness.change_resource.quantity,
+            consumed: witness.resource.quantity,
+        })?;
+    if total != witness.resource.quantity {
+        return Err(CircuitError::ConservationBroken {
+            external_sum,
+            recipient_sum,
+            change: witness.change_resource.quantity,
+            consumed: witness.resource.quantity,
         });
     }
 
-    // 11. Compute the consumed vault's logic instance journal (PA-format).
+    // 12. Compute the consumed vault's logic instance journal (PA-format).
     let tag = witness.resource.tag(true, &witness.nf_key).map_err(|_| CircuitError::ResourceError)?;
     let instance = LogicInstance {
         tag: digest_to_array(&tag),
@@ -212,12 +258,15 @@ pub fn constrain_multisig_consumed(
         h.finalize().into()
     };
 
-    // 12. spend_message = SHA256(domain || journal_digest). For v0.5 we no longer fold in
-    //     outflow_journal_digests because external_payload sits on the consumed vault and is
-    //     therefore already covered by `journal_digest`.
-    let spend_msg = spend_message(&journal_digest, &OutflowDigests::new(vec![]));
+    // 13. spend_message = SHA256(domain || journal_digest || u32_le(num_recipients) || sorted_recipient_commitments).
+    //     The journal_digest already binds external_payload (and therefore EVM withdraw
+    //     destinations + amounts). The sorted recipient commitments bind the K-of-N
+    //     signature to the specific RM-internal recipients — preventing a malicious
+    //     tx-assembler from substituting recipient resources after K-of-N signs.
+    let recipients = RecipientCommitments::new(recipient_commitments_unsorted);
+    let spend_msg = spend_message(&journal_digest, &recipients);
 
-    // 13. Verify all K signatures
+    // 14. Verify all K signatures
     for slot in &witness.signatures {
         let pk = &witness.pubkeys[slot.idx as usize];
         verify_secp256k1(pk, &spend_msg, &slot.sig_der)?;

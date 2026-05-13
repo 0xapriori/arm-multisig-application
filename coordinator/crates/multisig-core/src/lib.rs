@@ -27,7 +27,7 @@ pub use constants::{
 pub use journal::{AppData, DeletionCriterion, ExpirableBlob, LogicInstance};
 pub use label::{LabelPreimage, MULTISIG_DOMAIN, NULLIFIER_KEY_DOMAIN};
 pub use sig::{verify_secp256k1, SigError, K_DOMAIN_SEP};
-pub use spend::{spend_message, OutflowDigests};
+pub use spend::{spend_message, RecipientCommitments};
 
 pub use anoma_rm_risc0;
 pub use risc0_zkvm;

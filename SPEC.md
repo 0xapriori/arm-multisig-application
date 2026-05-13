@@ -1,29 +1,44 @@
 # Anoma Multi-Sig on `pa-evm`
 
-**Version:** 0.4
+**Version:** 0.5
 **Target:** canonical [`anoma/pa-evm`](https://github.com/anoma/pa-evm) at PA `v1.1.0`, RISC Zero verifier selector `0x73c457ba`.
 **Status:** design — partial implementation
 
 ## 1. Scope
 
-A k-of-n multi-signature vault for ERC20 tokens on EVM where:
+A k-of-n multi-signature vault on the Anoma Resource Machine (EVM protocol adapter) supporting two spend modes:
 
+- **EVM withdraw** — K-of-N authorizes a transfer to an external Ethereum address via a singleton `MultisigForwarder`. Recipient + amount are public (necessarily — the ERC-20 `Transfer` event is part of the standard).
+- **RM-internal transfer** — K-of-N authorizes the value to be re-issued as a resource controlled by another RM holder (another vault, an AnomaPay user, any RM-native recipient). Recipient + amount stay private; PA only sees commitment updates. This mirrors AnomaPay's user-to-user `transfer` flow.
+
+A single spend can mix both (hybrid mode). The `multisig_v1` circuit binds K-of-N authorization to both the EVM-side external payloads (via journal_digest) and the RM-internal recipient commitments (via the spend message).
+
+Properties:
 - Vault state is RM resources (a "kind" derived from `labelRef`), not a Solidity account.
 - Signer set is committed in `labelRef` but not publicly revealed.
-- Spend authorization is a RISC0 logic proof verified via the existing `ProtocolAdapter`.
-- A single `MultisigForwarder` instance holds the ERC20s of *all* vaults using this circuit; per-vault accounting is virtual (RM-native), enforced by the compliance circuit's per-kind balance + `wrap_v1`'s amount binding.
+- Spend authorization is a RISC Zero logic proof verified via the existing `ProtocolAdapter`.
+- A single `MultisigForwarder` instance holds the ERC-20s of *all* vaults using this circuit; per-vault accounting is virtual (RM-native), enforced by the compliance circuit's per-kind balance.
 - Movement is atomic and proof-gated by the PA.
 
 ### Privacy properties
 
-What IS private:
+Privacy depends on which spend mode is used.
+
+**Always private:**
 - **Signer set.** Pubkeys are committed in `labelRef` and never revealed on-chain.
 - **Policy parameters.** `k`, `n`, and `salt` are part of the `labelRef` preimage; observers see only the hash.
 - **Vault discoverability.** Only parties holding `label_preimage` can derive the vault's nullifier key and locate its notes in the commitment tree.
-- **Vault balance.** Notes are commitments; total holdings per vault aren't directly readable from chain state (though the singleton forwarder's aggregate ERC20 balance is).
+- **Vault balance.** Notes are commitments; total holdings per vault aren't directly readable from chain state (though the singleton forwarder's aggregate ERC-20 balance is).
 
-What is NOT private (v1):
-- **Recipient, amount, and token of each spend.** The PA emits `externalPayload` blobs as events; the encoded `(token, recipient, amount)` is public. Confidential transfers require a different forwarder design (see §13).
+**Private under RM-internal transfers** (recipient is another RM holder, no EVM crossing):
+- **Recipient.** PA only sees a commitment getting added to the tree. The recipient's identity is hidden — anyone holding the recipient's discovery key can find the resource; nobody else can.
+- **Amount.** The recipient resource's quantity is part of the preimage, not the commitment.
+- **Token.** Same — encoded in `labelRef` of the recipient resource; not visible.
+
+This is the same privacy model AnomaPay's user-to-user `transfer` provides today.
+
+**Public under EVM withdrawals** (recipient is an external Ethereum address):
+- Recipient, amount, and token are visible via `ExternalPayload` and `IERC20.Transfer` events. This is a hard EVM-boundary constraint — the standard ERC-20 `Transfer(from, to, value)` event is mandatory and there's no way for a non-shielded ERC-20 to hide it. Confidential transfers to EVM addresses require a different protocol (Aztec-style mixer, shielded ERC-20); see §13.
 
 ### Non-goals (v1)
 
@@ -140,24 +155,30 @@ Anyone holding `label_preimage` can derive the nullifier and submit a spend. Aut
 
 ### 5.2 Private witness
 
-- `Resource` preimage matching `tag`
+- `Resource` preimage matching `tag` (the consumed vault note)
 - `label_preimage` (per §4.2)
 - `pubkeys[n]` — sorted compressed pubkeys, must hash to `label_preimage.pubkey_root`
 - For each signing slot `i ∈ {0..k−1}`: `(idx_i, sig_i)` with `idx_i < idx_{i+1}` (strictly increasing; ensures distinct signers)
-- For each outflow ephemeral `j` in the action that has `labelRef == witness_resource.labelRef`:
-  - the outflow's `commitment` (so the circuit can verify membership in `actionTreeRoot`)
-  - the outflow's `appData` (so the circuit can compute its journal digest and include it in the signed message)
-- The action's full tag list (so the circuit can reconstruct `actionTreeRoot` and prove outflow commitments are members)
+- `change_resource` — the created resource paired with the consumed vault in compliance, carrying the unspent remainder. Must have `labelRef == consumed.labelRef` (same vault) and `quantity ≤ consumed.quantity`.
+- `recipient_resources: Vec<Resource>` — created resources representing RM-internal transfers (each may have a different `labelRef`, encoding a transfer to another vault / AnomaPay user / etc.). Empty for pure EVM-withdraw mode.
+- The action's full tag list, used to verify (a) the change commitment, and (b) every recipient commitment, are present in `actionTreeRoot`.
 
-### 5.3 Constraints — consumed branch
+### 5.3 Constraints — consumed branch (v0.5)
 
-1. `compute_commitment(witness_resource) == derived_commitment` and `compute_nullifier(witness_resource) == tag` (per RM nullifier construction; also gives the circuit authenticated access to all resource fields).
+1. `compute_commitment(witness_resource) == derived_commitment` and `compute_nullifier(witness_resource) == tag`.
 2. `SHA256(label_preimage) == witness_resource.labelRef`.
 3. `SHA256("anoma.multisig.v1.nfk-key" ‖ label_preimage) == nullifier_key`, and `SHA256(nullifier_key) == witness_resource.nullifierKeyCommitment`.
 4. `|pubkeys| == label_preimage.n`, pubkeys sorted, `SHA256(pk_0 ‖ … ‖ pk_{n-1}) == label_preimage.pubkey_root`.
 5. `k_witness == label_preimage.k`.
 6. `idx_0 < idx_1 < … < idx_{k-1} < n`.
-7. **Compute the in-circuit `Logic.Instance` journal digest exactly as `RiscZeroUtils.toJournal(Logic.Instance)` does:**
+7. `change_resource.labelRef == consumed.labelRef`, `change_resource.quantity ≤ consumed.quantity`, `change_resource.commitment` ∈ `action_tags`.
+8. For each `recipient_resources[j]`: `recipient.commitment` ∈ `action_tags`. (No constraint on `recipient.labelRef` — it can be any other vault's kind, encoding a private transfer to that holder.)
+9. Walk `appData.externalPayload` blobs. For each blob whose decoded `forwarder == MULTISIG_FORWARDER`, decode the inner input as `(token, recipient, amount, expected)`, require `token == label_preimage.token_addr`, accumulate `external_sum += amount`. Blobs with other forwarder addresses are allowed but don't contribute to `external_sum` — they're a compositional escape hatch governed by other resource logics.
+10. **Conservation:** `external_sum + sum(recipient.quantity) + change.quantity == consumed.quantity`. This single equation supports the three modes:
+    - Pure EVM withdraw: `recipient_sum = 0`, `external_sum > 0`
+    - Pure RM-internal: `external_sum = 0`, `recipient_sum > 0` (private)
+    - Hybrid: both > 0
+11. **Compute the in-circuit `Logic.Instance` journal digest exactly as `RiscZeroUtils.toJournal(Logic.Instance)` does:**
    ```
    journal = tag                                                     // 32 B
           ‖ (isConsumed ? 0x01000000 : 0x00000000)                  //  4 B little-endian uint32
@@ -173,20 +194,15 @@ Anyone holding `label_preimage` can derive the nullifier and submit a spend. Aut
            encode(b)   // matches RiscZeroUtils encoding exactly
    journal_digest = SHA256(journal)
    ```
-   This binds *every* field PA's verifier checks — including all four payload categories — into the consumed-vault portion of the signature.
-8. **Reconstruct `actionTreeRoot`** from the witnessed action tag list (`MerkleTree.computeRoot`); check it equals the public `actionTreeRoot`. This authenticates the witnessed tag list.
-9. **For each witnessed outflow ephemeral `j`:** verify its `commitment` is in the witnessed tag list. Compute `outflow_journal_digest_j = SHA256(toJournal(Logic.Instance{tag: outflow.commitment, isConsumed: false, actionTreeRoot, appData: outflow.appData}))`.
-10. `outflow_digests = sorted_ascending(outflow_journal_digest_j)`. Sorting domain-separates from witness ordering.
-11. `spend_message = SHA256("anoma.multisig.v1.spend" ‖ journal_digest ‖ uint32_le(|outflows|) ‖ concat(outflow_digests))`.
-12. For each `i`: ECDSA-secp256k1-verify(`pubkeys[idx_i]`, `spend_message`, `sig_i`) with **low-s enforcement**. The signature curve hash is SHA256 (not keccak).
+   This binds every field PA's verifier checks — including all four payload categories — into the consumed-vault portion of the signature, which fully covers the EVM-side `externalPayload` blobs.
+12. `recipient_commitments_sorted = sorted_ascending([recipient_resources[j].commitment for j in 0..len])`.
+13. `spend_message = SHA256("anoma.multisig.v1.spend" ‖ journal_digest ‖ uint32_le(|recipients|) ‖ concat(recipient_commitments_sorted))`.
+14. For each `i`: ECDSA-secp256k1-verify(`pubkeys[idx_i]`, `spend_message`, `sig_i`) with **low-s enforcement**. Signature hash is SHA256 (not keccak).
 
-Why bind the consumed journal AND the outflow journals: `actionTreeRoot` commits to all tags but not to `appData`. The consumed vault's `journal_digest` binds its own `appData`. But the actual *external transfers* live in the outflow ephemerals' `externalPayload` (so `wrap_v1` can constrain `external_payload.amount == outflow.quantity`). Without including outflow `appData` digests in the signed message, a prover holding K signatures could swap recipients/amounts on the outflows (the proof would still verify because their amounts only need to match the outflow quantities, which are themselves arbitrary). Including the outflow digests makes the signature cover the entire spend authorization.
-
-The amount-binding chain is now:
-- `wrap_v1` constrains `external_payload.amount == outflow.quantity` and `external_payload.token == labelRef.token_addr` and `external_payload.forwarder == MULTISIG_FORWARDER`.
-- Compliance per-kind balance forces `sum(outflow.quantity) + sum(change.quantity) == consumed.quantity` for vault-A-kind.
-- Signers see all outflows + change in the coordinator UI before signing; `spend_message` binds them.
-- Therefore the only way the K-of-N's authorization succeeds is if the action's actual external transfers equal what they signed for, denominated in the right token, going to a forwarder that holds the vault's funds.
+Why this binds correctly:
+- The consumed vault's `journal_digest` binds the entire `appData`, including every `externalPayload` blob — so EVM-withdraw recipient + amount + token are all signed.
+- The sorted `recipient_commitments` bind every RM-internal recipient — a malicious tx-assembler swapping in a different recipient resource changes its commitment, changes the sorted list, changes `spend_message`, and signature verification fails.
+- The conservation constraint (#10) ensures the math closes: every wei of consumed value lands somewhere the K-of-N approved (change to themselves, recipients they signed for, or external withdrawals they signed for).
 
 ### 5.4 Constraints — created branch
 
@@ -383,6 +399,37 @@ The new note may differ in any field except `quantity` (compliance enforces bala
 
 For migration to a new circuit version (new `multisig_v1` image ID): consume old vault note, create new vault note with new `logicRef`. New `MultisigForwarder` and `WrapForwarder` deployed; tokens migrated by issuing a withdraw to the new forwarder address.
 
+### 8.5 RM-internal transfer (vault A → recipient, no EVM crossing)
+
+```
+Action {
+  compliance_units: [
+    { consumed: vault_note_v_A,  created: change_note_v_A'   },  // multisig_v1 / multisig_v1
+    { consumed: ephemeral_zero,   created: recipient_note_v_B },  // wrap_v1     / multisig_v1 (or app)
+  ],
+  logic_inputs: [
+    v_A.proof              (multisig_v1, consumed)  // signs spend_message including recipient.commitment
+    v_A'.proof             (multisig_v1, created)
+    ephemeral_zero.proof   (wrap_v1, consumed)
+    recipient_note.proof   (logic of recipient's choosing — typically the recipient's own multisig_v1 created branch, or AnomaPay's TokenTransferPersistent logic)
+  ],
+  // NO externalPayload anywhere — nothing touches MultisigForwarder.
+}
+
+quantities:  vault_note_v_A.quantity == change_note_v_A'.quantity + recipient_note_v_B.quantity
+                  (Q)                       (Q - X)                       (X)
+```
+
+Notes:
+- The recipient resource may be controlled by anything: another `multisig_v1` vault (recipient holds their own K-of-N), an AnomaPay user's `TokenTransferPersistent` logic, or any other RM logic. Vault A's signers don't need to know the recipient's logic — they only sign over the recipient's commitment, which fully binds the recipient's resource preimage.
+- Discoverability: vault A's coordinator encrypts the recipient note's preimage to the recipient's discovery key (standard `discoveryPayload` channel) so the recipient can find the note off-chain.
+- Privacy: PA emits no `ExternalPayload` event for this action (there are none). The only chain-visible artifacts are the new commitment in the merkle tree and the consumed vault's nullifier. An observer cannot determine recipient identity, transferred amount, or even the token from chain state alone.
+- Compliance balance: the (`ephemeral_zero`, `recipient_note`) unit has zero kind delta if `recipient.labelRef == vault_A.labelRef` (same kind). For cross-kind transfers (recipient is a different vault), the action needs a wrap pair to balance both kinds — same shape as the deposit pattern in §8.3, just composed inside one action.
+
+### 8.6 Hybrid (RM-internal + EVM withdraw in one signature batch)
+
+Combine §8.1 and §8.5 in a single action: K-of-N signs over a single `spend_message` that binds both the consumed vault's `appData` (covering EVM `externalPayload` blobs) AND the sorted recipient commitments. Conservation forces `external_sum + recipient_sum + change == consumed`.
+
 ## 9. Off-chain coordinator
 
 ### 9.1 Components
@@ -410,10 +457,13 @@ If the UI hides any of these, the signer is signing blind and the protocol's gua
 
 - On-chain compromise of signer set discovery (pubkeys committed, not revealed).
 - Authorization replay across actions or across vault notes (bound by `spend_message`, which binds `actionTreeRoot` via `journal_digest`).
-- Forwarder address substitution (`MULTISIG_FORWARDER` is a circuit constant; `wrap_v1` rejects any other address).
-- Recipient, amount, or token substitution on outflows (signed via outflow journal digest in `spend_message`; amount/token bound in-circuit by `wrap_v1`).
+- Forwarder address substitution (`MULTISIG_FORWARDER` is a circuit constant baked into the image ID).
+- EVM-side recipient/amount/token substitution (signed via `journal_digest` which commits the entire `appData.externalPayload`).
+- RM-internal recipient substitution (recipient commitments fold into `spend_message` — swapping a recipient changes the sorted set, changes `spend_message`, fails signature verification).
+- Conservation breaks (sum of change + recipients + external must equal consumed; circuit rejects otherwise).
 - Cross-vault drain. The shared forwarder physically holds all vaults' tokens, but compliance per-kind balance prevents vault A's K-of-N from constructing a balanced action that touches vault B's funds — moving any vault-B-kind requires consuming vault-B-kind, which only vault B's signers can authorize via their `multisig_v1` proof.
 - Submitter substitution (PA verifies proof; submitter doesn't matter).
+- **Activity privacy under RM-internal mode.** Recipient identity, amount, and token are not visible to chain observers — only commitment updates are public.
 
 ### 10.2 What this does NOT protect against
 
@@ -427,6 +477,7 @@ If the UI hides any of these, the signer is signing blind and the protocol's gua
 - **Stuck funds** for tokens transferred to the forwarder outside the wrap path.
 - **Sticky policy** — change note can have a different labelRef; relies on signer review (Q3).
 - **Same-circuit-version drain via collusion across vaults.** If K-of-N of vault A and K-of-N of vault B both collude, they can jointly construct multi-action transactions that move funds across vaults in ways neither alone could. This is by definition (combined K signers from two vaults = two compromised vaults), not a new attack.
+- **Activity privacy under EVM-withdraw mode.** Recipient/amount/token are public via `ExternalPayload` and `IERC20.Transfer` events. This is an EVM-boundary constraint — the standard ERC-20 `Transfer` event is mandatory. Use RM-internal mode for private transfers (§8.5).
 
 ## 11. Open design questions
 
@@ -466,16 +517,17 @@ If the UI hides any of these, the signer is signing blind and the protocol's gua
 ### Adversarial
 
 - Replay a previously executed transaction (must revert via duplicate nullifier in `NullifierSet`).
-- Substitute the forwarder address in an outflow's external payload (must fail `wrap_v1` constraint — `MULTISIG_FORWARDER` is a circuit constant).
-- Substitute the recipient in an outflow's external payload (must fail signature verification — outflow journal digest is in `spend_message`).
-- Substitute outflow amount or token (must fail `wrap_v1` constraints `amount == quantity`, `token == labelRef.token_addr`).
+- Substitute the EVM recipient in `externalPayload` (must fail signature verification — `journal_digest` covers `appData`).
+- Substitute external token or amount (must fail conservation or token-mismatch constraint).
+- **RM-internal: substitute the recipient resource** (must fail signature verification — recipient commitment is in `spend_message`).
+- **RM-internal: omit a recipient resource that signers approved** (must fail — the omitted commitment was in the original `spend_message`).
+- **RM-internal: tamper any quantity to break conservation** (must fail with `ConservationBroken`).
 - Cross-vault drain attempt: vault A's K-of-N signs an action that creates outflows of vault-B-kind. Compliance must reject (vault-B-kind cannot be created without consuming vault-B-kind, and vault A's K-of-N cannot consume vault-B notes since only vault B's `multisig_v1` proof can nullify them).
-- Add an extra outflow not signed by K-of-N: signature must fail because `spend_message` includes ALL outflows' journal digests sorted; an extra outflow changes the sorted set.
 - Submit a transaction during PA pause (must revert via `whenNotPaused`).
 
 ## 13. v2 candidates (out of scope)
 
-- Encrypted external payloads (activity privacy) via a confidential-transfer forwarder.
+- Confidential EVM withdrawals (Aztec-style mixer pool or shielded ERC-20 wrapper) — needed only for activity-private transfers to *external EVM addresses*. RM-internal transfers are already private (§8.5).
 - Composition with intent-style logics (price oracles, time locks) in the same action.
 - Schnorr signature aggregation in-circuit (K signers private behind a single aggregate sig).
 - Native ETH support via a payable wrapper forwarder.

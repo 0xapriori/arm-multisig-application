@@ -5,13 +5,12 @@
 //! commitments) is derived deterministically from a seed for reproducibility.
 
 use k256::ecdsa::signature::DigestSigner;
-use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
+use k256::ecdsa::{Signature, SigningKey};
 use sha2::{Digest as _, Sha256};
 
-use multisig_core::constants::WRAP_FORWARDER_OP_WRAP;
 use multisig_core::journal::{AppData, DeletionCriterion, ExpirableBlob};
 use multisig_core::label::{LabelPreimage, NULLIFIER_KEY_DOMAIN};
-use multisig_core::spend::{spend_message, OutflowDigests};
+use multisig_core::spend::{spend_message, RecipientCommitments};
 use multisig_core::witness::{MultisigConsumedWitness, SignerSlot};
 
 use anoma_rm_risc0::{
@@ -160,6 +159,7 @@ pub fn encode_external_transfer(
 }
 
 /// Compute the spend_message that K-of-N must sign for a given consumed-vault witness.
+/// Mirrors `constrain_multisig_consumed`'s spend_message construction.
 pub fn compute_spend_message(witness: &MultisigConsumedWitness) -> [u8; 32] {
     use multisig_core::journal::{self, LogicInstance};
     let tag = witness
@@ -176,7 +176,14 @@ pub fn compute_spend_message(witness: &MultisigConsumedWitness) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(&bytes);
     let journal_digest: [u8; 32] = h.finalize().into();
-    spend_message(&journal_digest, &OutflowDigests::new(vec![]))
+    let recipients = RecipientCommitments::new(
+        witness
+            .recipient_resources
+            .iter()
+            .map(|r| digest_to_array(&r.commitment()))
+            .collect(),
+    );
+    spend_message(&journal_digest, &recipients)
 }
 
 fn digest_to_array(d: &Digest) -> [u8; 32] {
@@ -248,21 +255,156 @@ pub fn build_full_spend_witness(seed: u8, quantity: u128) -> MultisigConsumedWit
         pubkeys: vault.pubkeys.clone(),
         signatures: vec![],
         change_resource,
+        recipient_resources: vec![], // pure EVM-withdraw mode
         action_tags,
     };
 
-    let msg = compute_spend_message(&witness);
+    sign_witness(&mut witness, &vault.signers, &[0, 2]);
+    witness
+}
 
-    // 2 signers — indices 0 and 2 (skip the middle to test idx ordering)
-    let signers_to_use = [0usize, 2usize];
+/// Build a MultisigConsumedWitness for a pure RM-internal transfer:
+///   - consume vault A's note (Q tokens)
+///   - create change note (Q-X) staying in vault A
+///   - create recipient resource (X tokens) controlled by a different label_preimage
+///   - NO external_payload — nothing crosses the EVM boundary
+///   - PA only sees commitment updates; recipient address + amount are NOT public
+///
+/// `recipient_seed` controls the recipient vault's identity (different from `seed` so the
+/// recipient is a distinct vault).
+pub fn build_rm_internal_witness(
+    seed: u8,
+    recipient_seed: u8,
+    consumed_quantity: u128,
+    transfer_quantity: u128,
+) -> MultisigConsumedWitness {
+    assert!(transfer_quantity <= consumed_quantity);
+    let vault = TestVault::deterministic(seed);
+    let recipient_vault = TestVault::deterministic(recipient_seed);
+
+    let mut nonce = [0u8; 32];
+    nonce[0] = 0xCA;
+    let mut rand_seed = [0u8; 32];
+    rand_seed[0] = 0xFE;
+    let resource = vault.build_resource(consumed_quantity, nonce, rand_seed);
+
+    // Change stays in vault A
+    let mut change_nonce = [0u8; 32];
+    change_nonce[0] = 0xCC;
+    let change_resource = vault.build_resource(consumed_quantity - transfer_quantity, change_nonce, rand_seed);
+
+    // Recipient resource — different labelRef = different vault-kind. Built with the
+    // recipient_vault's label so the recipient (a separate K-of-N policy) can spend it later.
+    let mut recipient_nonce = [0u8; 32];
+    recipient_nonce[0] = 0xDD;
+    let recipient_resource = recipient_vault.build_resource(transfer_quantity, recipient_nonce, rand_seed);
+
+    // No external_payload: pure RM-internal transfer
+    let app_data = AppData::default();
+
+    let tag = resource.tag(true, &vault.nf_key).expect("tag");
+    let action_tags: Vec<Digest> = vec![tag, change_resource.commitment(), recipient_resource.commitment()];
+
+    let mut h = Sha256::new();
+    for t in &action_tags {
+        h.update(t.as_bytes());
+    }
+    let atr_bytes: [u8; 32] = h.finalize().into();
+    let action_tree_root = Digest::from_bytes(atr_bytes);
+
+    let mut witness = MultisigConsumedWitness {
+        action_tree_root,
+        app_data,
+        resource,
+        nf_key: vault.nf_key.clone(),
+        label_preimage: vault.label.clone(),
+        pubkeys: vault.pubkeys.clone(),
+        signatures: vec![],
+        change_resource,
+        recipient_resources: vec![recipient_resource],
+        action_tags,
+    };
+
+    sign_witness(&mut witness, &vault.signers, &[0, 2]);
+    witness
+}
+
+/// Build a hybrid: some value goes to a recipient (RM-internal, private), some goes out via
+/// MultisigForwarder (EVM withdraw, public).
+pub fn build_hybrid_witness(
+    seed: u8,
+    recipient_seed: u8,
+    consumed: u128,
+    rm_transfer: u128,
+    evm_withdraw: u128,
+) -> MultisigConsumedWitness {
+    assert!(rm_transfer + evm_withdraw <= consumed);
+    let vault = TestVault::deterministic(seed);
+    let recipient_vault = TestVault::deterministic(recipient_seed);
+
+    let change = consumed - rm_transfer - evm_withdraw;
+
+    let mut nonce = [0u8; 32];
+    nonce[0] = 0xCA;
+    let mut rand_seed = [0u8; 32];
+    rand_seed[0] = 0xFE;
+    let resource = vault.build_resource(consumed, nonce, rand_seed);
+
+    let mut change_nonce = [0u8; 32];
+    change_nonce[0] = 0xCC;
+    let change_resource = vault.build_resource(change, change_nonce, rand_seed);
+
+    let mut recipient_nonce = [0u8; 32];
+    recipient_nonce[0] = 0xDD;
+    let recipient_resource = recipient_vault.build_resource(rm_transfer, recipient_nonce, rand_seed);
+
+    let blob = encode_external_transfer(TEST_MULTISIG_FORWARDER, TEST_TOKEN, TEST_RECIPIENT, evm_withdraw);
+    let app_data = AppData {
+        resource_payload: vec![],
+        discovery_payload: vec![],
+        external_payload: vec![ExpirableBlob {
+            deletion_criterion: DeletionCriterion::Never,
+            blob,
+        }],
+        application_payload: vec![],
+    };
+
+    let tag = resource.tag(true, &vault.nf_key).expect("tag");
+    let action_tags: Vec<Digest> = vec![tag, change_resource.commitment(), recipient_resource.commitment()];
+
+    let mut h = Sha256::new();
+    for t in &action_tags {
+        h.update(t.as_bytes());
+    }
+    let atr_bytes: [u8; 32] = h.finalize().into();
+    let action_tree_root = Digest::from_bytes(atr_bytes);
+
+    let mut witness = MultisigConsumedWitness {
+        action_tree_root,
+        app_data,
+        resource,
+        nf_key: vault.nf_key.clone(),
+        label_preimage: vault.label.clone(),
+        pubkeys: vault.pubkeys.clone(),
+        signatures: vec![],
+        change_resource,
+        recipient_resources: vec![recipient_resource],
+        action_tags,
+    };
+
+    sign_witness(&mut witness, &vault.signers, &[0, 2]);
+    witness
+}
+
+fn sign_witness(witness: &mut MultisigConsumedWitness, signers: &[SigningKey], indices: &[usize]) {
+    let msg = compute_spend_message(witness);
     let mut signatures = Vec::new();
-    for &i in &signers_to_use {
-        let sig = sign_low_s_der(&vault.signers[i], &msg);
+    for &i in indices {
+        let sig = sign_low_s_der(&signers[i], &msg);
         signatures.push(SignerSlot {
             idx: i as u32,
             sig_der: sig,
         });
     }
     witness.signatures = signatures;
-    witness
 }

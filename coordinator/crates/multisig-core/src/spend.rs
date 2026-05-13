@@ -1,32 +1,39 @@
 //! Construction of the K-of-N signed `spend_message`.
 //!
-//! Per spec §5.3 step 11 (v0.4):
+//! Per spec §5.3 (v0.5):
 //!     spend_message = SHA256(
 //!         "anoma.multisig.v1.spend"
 //!      || consumed_vault.journal_digest
-//!      || uint32_le(num_outflows)
-//!      || sorted_ascending(outflow_journal_digests)
+//!      || uint32_le(num_recipients)
+//!      || sorted_ascending(recipient_commitments)
 //!     )
 //!
-//! Sorting is lexicographic over the 32-byte digest, ascending. This is what binds the
-//! K-of-N signature to every outflow's appData (and therefore every outflow's external
-//! payload, including its forwarder/recipient/amount).
+//! - `consumed_vault.journal_digest` binds the entire consumed-vault appData (including any
+//!   `externalPayload` blobs that authorize EVM-side `MultisigForwarder` transfers).
+//! - The sorted recipient commitment list binds the K-of-N signature to the specific RM-
+//!   internal recipients (cross-kind transfers to other vaults / AnomaPay users / etc.).
+//!   For the pure EVM-withdraw case this list is empty and the signed message degrades to
+//!   `SHA256(domain || journal_digest)` (matching v0.4 implementation).
+//!
+//! Sorting is lexicographic over the 32-byte commitment, ascending — domain-separates
+//! from witness ordering and forces deterministic agreement between off-chain coordinator
+//! and in-circuit witness assembly.
 
 use sha2::{Digest, Sha256};
 
 use crate::sig::K_DOMAIN_SEP;
 
-/// Sorted set of outflow journal digests, ready to be folded into the spend message.
-pub struct OutflowDigests(Vec<[u8; 32]>);
+/// Sorted set of recipient commitments, ready to be folded into the spend message.
+/// (Pre-v0.5 this was named `OutflowDigests`; renamed for clarity since recipients are now
+/// bound by their commitment, not by their outflow journal digest.)
+pub struct RecipientCommitments(Vec<[u8; 32]>);
 
-impl OutflowDigests {
-    /// Take an arbitrary list of outflow journal digests, sort them ascending, and return the
-    /// canonical ordering. Domain separation: the same set of digests in any input order
-    /// produces the same canonical encoding, so the off-chain coordinator and the in-circuit
-    /// witness assembly cannot disagree.
-    pub fn new(mut digests: Vec<[u8; 32]>) -> Self {
-        digests.sort();
-        Self(digests)
+impl RecipientCommitments {
+    /// Take an arbitrary list of recipient commitments, sort them ascending, and return the
+    /// canonical ordering.
+    pub fn new(mut commitments: Vec<[u8; 32]>) -> Self {
+        commitments.sort();
+        Self(commitments)
     }
 
     pub fn len(&self) -> usize {
@@ -38,17 +45,23 @@ impl OutflowDigests {
     }
 }
 
-pub fn spend_message(consumed_journal_digest: &[u8; 32], outflows: &OutflowDigests) -> [u8; 32] {
+/// v0.5 spend_message constructor. `recipients` is the sorted set of RM-internal recipient
+/// commitments; pass an empty `RecipientCommitments::new(vec![])` for pure EVM-withdraw mode.
+pub fn spend_message(consumed_journal_digest: &[u8; 32], recipients: &RecipientCommitments) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(K_DOMAIN_SEP);
     hasher.update(consumed_journal_digest);
-    let n = u32::try_from(outflows.len()).expect("more than u32::MAX outflows is impossible");
+    let n = u32::try_from(recipients.len()).expect("more than u32::MAX recipients is impossible");
     hasher.update(n.to_le_bytes());
-    for d in &outflows.0 {
-        hasher.update(d);
+    for c in &recipients.0 {
+        hasher.update(c);
     }
     hasher.finalize().into()
 }
+
+/// Backwards-compat alias kept for one release so existing call sites compile during migration.
+#[deprecated(note = "renamed to RecipientCommitments in v0.5")]
+pub type OutflowDigests = RecipientCommitments;
 
 #[cfg(test)]
 mod tests {

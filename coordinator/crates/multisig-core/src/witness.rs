@@ -47,11 +47,20 @@ pub struct MultisigConsumedWitness {
     pub signatures: Vec<SignerSlot>,
 
     /// The change resource preimage (a created vault note paired with the consumed via
-    /// compliance). Quantity is used to bind external_payload sum: `sum(amounts) ==
-    /// consumed.quantity - change.quantity`.
+    /// compliance). Quantity is part of the conservation equation:
+    /// `external_sum_to_MSF + sum(recipient.quantity) + change.quantity == consumed.quantity`.
     pub change_resource: Resource,
+    /// RM-internal recipients: created resources whose value is being transferred to other
+    /// holders (other vaults, AnomaPay users, any RM-native recipient) without crossing
+    /// the EVM boundary. Each recipient's commitment is verified to be in `action_tags`,
+    /// and their quantities + change + external_sum must equal the consumed quantity.
+    /// This is the AnomaPay-style private transfer path: PA only sees commitment updates,
+    /// no `IERC20.Transfer` event, no `ExternalPayload` event for these.
+    /// Empty Vec = pure EVM-withdraw mode (v0.4 behavior).
+    pub recipient_resources: Vec<Resource>,
     /// The full action tag list, used to (a) reconstruct `actionTreeRoot` and (b) verify
-    /// `change_resource.commitment()` is in the action.
+    /// `change_resource.commitment()` and each `recipient_resources[i].commitment()` are in
+    /// the action.
     pub action_tags: Vec<Digest>,
 }
 
