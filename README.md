@@ -75,6 +75,19 @@ First-time host build compiles the RISC Zero guest crates to RISC-V ELFs (~3 min
 
 The PA owner can permanently brick all vaults via `emergencyStop()`. `MultisigForwarder` requires `msg.sender == PA`, so a stopped PA = unrecoverable funds. v1 testnet runs against canonical PA; **mainnet vaults SHOULD fork the PA with a multi-sig owner.** Full table in §2 of the spec.
 
+## License
+
+Dual-licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+`contracts/src/interfaces/IForwarder.sol` is vendored from [anoma/pa-evm](https://github.com/anoma/pa-evm) and retains its upstream MIT license.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
+
 ---
 
 # Design spec
