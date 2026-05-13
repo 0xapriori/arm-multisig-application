@@ -1,0 +1,34 @@
+[package]
+name = "arm-multisig-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side prover + integration tests for arm-multisig-application."
+
+[dependencies]
+multisig-core = { path = "../coordinator/crates/multisig-core" }
+multisig-v1 = { path = "../circuits/multisig-v1" }
+wrap-v1 = { path = "../circuits/wrap-v1" }
+anoma-rm-risc0 = { workspace = true, features = ["prove"] }
+risc0-zkvm = { workspace = true, features = ["std", "client"] }
+# Force the rest of the risc0 ecosystem to stay on the same patch versions as
+# anoma/arm-risc0 v1.1.1 — newer patches break risc0-zkvm 3.0.3 (read_u32s API change).
+risc0-zkp.workspace = true
+risc0-binfmt.workspace = true
+risc0-groth16.workspace = true
+risc0-circuit-rv32im.workspace = true
+risc0-circuit-recursion.workspace = true
+risc0-circuit-keccak.workspace = true
+risc0-core.workspace = true
+risc0-zkvm-platform.workspace = true
+k256.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+hex.workspace = true
+serde.workspace = true
+rand.workspace = true
+
+[features]
+default = []
+# Enable to skip RISC Zero proving (uses dev mode) — useful for fast end-to-end tests.
+dev-mode = []

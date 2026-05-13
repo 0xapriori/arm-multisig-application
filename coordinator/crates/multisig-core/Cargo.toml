@@ -1,0 +1,20 @@
+[package]
+name = "multisig-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust label/journal encoding, ECDSA, action assembly. Shared between off-chain coordinator and RISC Zero guest circuits."
+
+[dependencies]
+sha2 = { workspace = true, features = ["std"] }
+k256 = { workspace = true }
+hex = { workspace = true, features = ["std"] }
+thiserror.workspace = true
+serde = { workspace = true, features = ["std", "derive"] }
+serde_with.workspace = true
+anoma-rm-risc0.workspace = true
+risc0-zkvm = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+rand.workspace = true

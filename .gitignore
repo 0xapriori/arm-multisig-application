@@ -1,0 +1,24 @@
+# Rust
+target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+# contracts/lib/openzeppelin-contracts is tracked as a submodule; build artifacts elsewhere ignored
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env files (NEVER commit secrets)
+.env
+.env.local
+
+# RISC0 build artifacts (regenerated on every build)
+**/risc0-build-out/

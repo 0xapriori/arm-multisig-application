@@ -1,0 +1,13 @@
+[package]
+name = "wrap-v1-methods"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compiles the wrap_v1 RISC Zero guest and exports its ELF + image ID."
+
+[build-dependencies]
+risc0-build.workspace = true
+
+[package.metadata.risc0]
+methods = ["guest"]

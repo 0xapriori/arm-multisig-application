@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "coordinator/crates/multisig-core",
+    "circuits/multisig-v1",
+    "circuits/multisig-v1/methods",
+    "circuits/wrap-v1",
+    "circuits/wrap-v1/methods",
+    "host",
+]
+# Guest crates (circuits/*/methods/guest) are NOT workspace members. They are compiled
+# separately with the riscv32im-risc0-zkvm-elf target by risc0-build.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/0xapriori/arm-multisig-application"
+
+[workspace.dependencies]
+# Pinned to versions that produce proofs verifiable by canonical pa-evm v1.1.0
+# (RISC Zero verifier selector 0x73c457ba). See SPEC.md §2 trust assumption T5b.
+# These pins mirror the working set in anoma/arm-risc0 v1.1.1's Cargo.lock.
+risc0-zkvm = { version = "=3.0.3", default-features = false, features = ["std"] }
+risc0-build = { version = "=3.0.3", features = ["unstable"] }
+risc0-zkp = { version = "=3.0.2", default-features = false }
+risc0-binfmt = { version = "=3.0.2", default-features = false }
+risc0-groth16 = { version = "=3.0.2", default-features = false }
+risc0-circuit-rv32im = { version = "=4.0.2", default-features = false }
+risc0-circuit-recursion = { version = "=4.0.2", default-features = false }
+risc0-circuit-keccak = { version = "=4.0.2", default-features = false }
+risc0-core = { version = "=3.0.0", default-features = false }
+risc0-zkvm-platform = { version = "=2.2.1", default-features = false }
+anoma-rm-risc0 = { git = "https://github.com/anoma/arm-risc0", tag = "v1.1.1", default-features = false }
+
+# Crypto
+sha2 = { version = "0.10", default-features = false }
+k256 = { version = "=0.13.3", default-features = false, features = ["arithmetic", "ecdsa", "expose-field", "serde", "std"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_with = "3"
+thiserror = "1"
+rand = "0.8"
+bincode = "1.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 3
+
+# Force the dependency resolver to use the exact RISC Zero versions that anoma/arm-risc0
+# v1.1.1's Cargo.lock pins. Without this, newer 4.0.x patches break with internal
+# read_u32s API changes (risc0-zkvm 3.0.3 expects the older return type).
+# These are not git overrides — just version pins via re-publish from crates.io.
+

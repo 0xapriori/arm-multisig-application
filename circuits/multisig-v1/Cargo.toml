@@ -1,0 +1,16 @@
+[package]
+name = "multisig-v1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side library exposing the multisig_v1 RISC Zero ELF + image ID and a prove() helper."
+
+[dependencies]
+multisig-core = { path = "../../coordinator/crates/multisig-core" }
+multisig-v1-methods = { path = "./methods" }
+risc0-zkvm = { workspace = true, features = ["std", "client"] }
+anoma-rm-risc0 = { workspace = true, features = ["prove"] }
+serde.workspace = true
+hex.workspace = true
+thiserror.workspace = true
