@@ -1,38 +1,8 @@
 # Anoma Multi-Sig on `pa-evm`
 
-**Version:** 0.4 draft
-**Target:** canonical [`anoma/pa-evm`](https://github.com/anoma/pa-evm) at PA `v1.1.0`, RISC Zero verifier selector `0x73c457ba`. The `0xapriori/pa-evmx` fork is 82 commits behind canonical at time of writing — use canonical.
+**Version:** 0.4
+**Target:** canonical [`anoma/pa-evm`](https://github.com/anoma/pa-evm) at PA `v1.1.0`, RISC Zero verifier selector `0x73c457ba`.
 **Status:** design — partial implementation
-
-## Changes from v0.3
-
-1. **Singleton `MultisigForwarder` instead of per-vault.** v0.3's per-vault forwarder was an EVM-style account-isolation patch on what should have been a circuit-level fix. RM accounting is virtual — vaults are kinds, not addresses — and one shared forwarder is the RM-native pattern. Per-vault deploys were unnecessary friction and a worse privacy story.
-2. **External payload moves back to the outflow ephemeral** (where v0.2 had it). The amount binding now happens in `wrap_v1` directly: `external_payload.amount == outflow.quantity`. Cleanest possible binding — no cross-resource witness in the consumed vault's circuit needed for amount.
-3. **`multisig_v1` signed message extended** to include the digest of every outflow ephemeral's `appData` (sorted by commitment). Signers' K-of-N signature now covers (a) consumed vault's full journal and (b) every outflow's appData (including its external payload). Cross-resource binding is purely additive on the message side; no compliance-pairing tricks required.
-4. **`label_preimage` drops `forwarder_addr`.** Now 83 bytes (was 123). Forwarder address is a global circuit constant.
-5. **Rotation simplified.** `forwarder_addr` is no longer a rotateable field. Rotation = (`pubkey_root`, `salt`, `k`, `n`) only.
-6. **Why this is safe even without per-vault isolation:** compliance enforces per-kind balance — vault A's K-of-N cannot construct a balanced action that drains vault B's funds, because moving any vault-A kind requires consuming vault-A notes (which only vault A's signers can authorize). With the single shared forwarder, blast radius of a K-of-N compromise is still bounded to that vault's holdings.
-
-## Changes from v0.2
-
-1. **Critical: signed message now binds the full `Logic.Instance` journal**, not just `external_digest`. Previously the K-of-N signature only covered `actionTreeRoot ‖ external_digest`. But `Logic.toJournal` (in `RiscZeroUtils.sol`) commits the entire `appData` (`resourcePayload`, `discoveryPayload`, `externalPayload`, `applicationPayload`) into the proof's journal, while the multisig circuit didn't constrain the non-external blobs. A prover holding K valid signatures could attach arbitrary `discoveryPayload` / `applicationPayload` / `resourcePayload` blobs; the proof would still verify and PA would emit them as events tagged to the signers' action. Not fund loss, but real signer-deniability and metadata-injection / leak risk. Fixed by signing over the journal digest itself, computed in-circuit.
-2. **Target updated** to canonical `anoma/pa-evm` at v1.1.0; `pa-evmx` fork is 82 commits behind canonical.
-3. **Coordinator gas estimation noted** — `simulateExecute(tx, skipRiscZeroProofVerification)` reverts with `Simulated(uint256 gasUsed)` and is the canonical way to gas-cost a transaction before submission.
-4. **`_checkSelector` behavior noted** — PA reads the first 4 bytes of every logic, compliance, and aggregation proof and rejects proofs whose selector doesn't match `0x73c457ba`. Off-chain prover handles transparently; relevant for choosing the RISC Zero toolchain version.
-
-## Changes from v0.1
-
-1. **Critical: per-vault forwarder.** v0.1 had a single shared `MultisigForwarder` keyed only on `MULTISIG_LOGIC_REF`. Because the same logicRef is shared by every vault using `multisig_v1`, vault A's K-of-N could drain vault B's funds out of the same forwarder. Fixed by deriving a per-vault forwarder address (committed in `labelRef`) and binding it in-circuit.
-2. **External payload sits on the consumed vault note**, not the outflow ephemeral. The outflow becomes pure RM bookkeeping.
-3. **`created_digest` removed** from the signed message — `actionTreeRoot` already commits to all created commitments.
-4. **Hardcoded forwarder constant removed** from the circuit — replaced by `labelRef`-bound forwarder address.
-5. **`externalPayload.length` no longer constrained to ≤ 1** — multiple forwarder calls are allowed.
-6. **Nullifier key derivation made explicit.**
-7. **`n == |witnessed_pubkeys|` enforced in-circuit.**
-8. **Signature message hash function specified as SHA256.**
-9. **Wrap circuit constraints written out.**
-
----
 
 ## 1. Scope
 
