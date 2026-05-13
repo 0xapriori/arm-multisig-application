@@ -123,7 +123,7 @@ In order of weight:
 |---|---|---|
 | T1 | PA owner can permanently brick the system via `emergencyStop()`. Vault funds become unrecoverable (`MultisigForwarder` requires `msg.sender == PA`). | Fork `ProtocolAdapter` with a multi-sig owner or a null owner. Reuse canonical RISC0 verifier router. |
 | T2 | RISC0 verifier router can be paused by *its* owner, also bricking the PA. | Inherent. Fork the router if T1 is forked. |
-| T3 | Aggregation circuit verifying key is hardcoded (`0x213b…0827`). | Inherent to `pa-evmx`. |
+| T3 | Aggregation circuit verifying key is hardcoded (`0x213b…0827`). | Inherent to `pa-evm`. |
 | T4 | Compliance circuit verifying key is hardcoded (`0x919e…314d`). | Inherent. |
 | T5 | RISC0 soundness. | Inherent. |
 | T5b | RISC Zero verifier selector pinned to `0x73c457ba` (`Versioning._RISC_ZERO_VERIFIER_SELECTOR`). PA's `_checkSelector` rejects proofs whose first 4 bytes don't match. Toolchain version drift = unspendable notes. | Pin the prover toolchain version that emits this selector; bake the selector into the off-chain coordinator's smoke test. |
@@ -137,19 +137,20 @@ T1 is the dominant constraint. v1 testnet runs against canonical PA; mainnet vau
 ```
 ┌────────────────┐     submit Tx      ┌──────────────────┐
 │   Coordinator  │ ─────────────────► │ ProtocolAdapter  │
-│   (off-chain)  │                    │   (pa-evmx)      │
+│   (off-chain)  │                    │   (pa-evm)       │
 └────────────────┘                    └────────┬─────────┘
         ▲                                      │ forwardCall(logicRef, input)
         │ collect K signatures                 │ msg.sender == PA
         │                                      ▼
 ┌────────────────┐                    ┌──────────────────┐
-│  N signers     │                    │ MultisigForwarder│ <- one per vault
-│ (off-chain)    │                    │  (holds ERC20s)  │
-└────────────────┘                    └──────────────────┘
+│  N signers     │                    │ MultisigForwarder│ <- singleton
+│ (off-chain)    │                    │  (holds ERC20s   │    (per-vault accounting
+└────────────────┘                    │   for all vaults)│     is virtual, enforced
+                                      └──────────────────┘     by compliance + wrap_v1)
                                             ▲
                                             │ on deposit
                                       ┌─────┴──────┐
-                                      │WrapForwarder│ <- shared
+                                      │WrapForwarder│ <- singleton
                                       └─────────────┘
 ```
 
@@ -540,7 +541,7 @@ If the UI hides any of these, the signer is signing blind and the protocol's gua
 
 ### Integration
 
-- Full deposit → spend → rotation cycle against a local PA deploy. Mirror the harness in `pa-evmx/example-tx-generation/`.
+- Full deposit → spend → rotation cycle against a local PA deploy. Mirror the harness in `anoma/pa-evm`'s `example-tx-generation/`.
 - Multi-recipient spend with three external payloads, three outflow pairs, single signature batch.
 - Rotation that changes the forwarder address, followed by a spend that transfers funds from old forwarder to new (separate pre-step).
 
