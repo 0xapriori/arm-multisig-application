@@ -106,9 +106,19 @@ A k-of-n multi-signature vault for ERC20 tokens on EVM where:
 - A single `MultisigForwarder` instance holds the ERC20s of *all* vaults using this circuit; per-vault accounting is virtual (RM-native), enforced by the compliance circuit's per-kind balance + `wrap_v1`'s amount binding.
 - Movement is atomic and proof-gated by the PA.
 
+### Privacy properties
+
+What IS private:
+- **Signer set.** Pubkeys are committed in `labelRef` and never revealed on-chain.
+- **Policy parameters.** `k`, `n`, and `salt` are part of the `labelRef` preimage; observers see only the hash.
+- **Vault discoverability.** Only parties holding `label_preimage` can derive the vault's nullifier key and locate its notes in the commitment tree.
+- **Vault balance.** Notes are commitments; total holdings per vault aren't directly readable from chain state (though the singleton forwarder's aggregate ERC20 balance is).
+
+What is NOT private (v1):
+- **Recipient, amount, and token of each spend.** The PA emits `externalPayload` blobs as events; the encoded `(token, recipient, amount)` is public. Confidential transfers require a different forwarder design (see §13).
+
 ### Non-goals (v1)
 
-- Activity-level privacy. Recipient and amount of every spend are public events.
 - Native ETH (WETH only).
 - Composition with non-multisig logics in the same action (works mechanically; not specified here).
 - Relayer / fee-payment mechanism.
